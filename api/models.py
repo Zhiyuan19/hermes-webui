@@ -343,6 +343,10 @@ class Session:
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
         self._metadata_message_count = None
+        # Preserve any extra kwargs (e.g. is_cli_session from saved JSON)
+        for k, v in kwargs.items():
+            if not k.startswith('_'):
+                setattr(self, k, v)
 
     @property
     def path(self):
@@ -361,6 +365,7 @@ class Session:
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
+            'is_cli_session',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['messages'] = self.messages
@@ -456,6 +461,7 @@ class Session:
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
+            'is_cli_session': getattr(self, 'is_cli_session', False),
         }
 
 def _get_profile_home(profile) -> Path:

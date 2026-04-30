@@ -474,6 +474,35 @@ def _resolve_effective_session_model_for_display(session) -> str:
     return effective_model or original_model
 
 
+# ── Agent session helpers ────────────────────────────────────────────────────
+
+def _session_id_is_agent_session(session_id: str) -> bool:
+    """Check whether a session_id exists in state.db with a non-WebUI source.
+
+    Used as a fallback in ``GET /api/session`` when compact() doesn't carry
+    ``is_cli_session`` (legacy sessions imported before the field was added).
+    """
+    import sqlite3
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.environ.get('HERMES_HOME', '~/.hermes')).expanduser().resolve()
+    db_path = hermes_home / 'state.db'
+    if not db_path.exists():
+        return False
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT source FROM sessions WHERE id = ? AND source IS NOT NULL AND source != 'webui'",
+                (session_id,),
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
 from api.models import (
     Session,
     get_session,
@@ -921,6 +950,11 @@ def handle_get(handler, parsed) -> bool:
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
             }
+            # If compact() didn't include is_cli_session=True (e.g. legacy
+            # imported sessions whose JSON predates the field), check state.db
+            # to see if this is actually an agent session (#1189).
+            if not raw.get('is_cli_session') and _session_id_is_agent_session(sid):
+                raw['is_cli_session'] = True
             # Signal to the frontend that older messages were omitted.
             # For msg_before paging, compare against the filtered set,
             # not the full list — otherwise we signal truncation even when
@@ -4156,6 +4190,10 @@ def _handle_session_import_cli(handler, body):
     # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
     if existing:
+        # Fix up legacy imported sessions that predate is_cli_session (#1189)
+        if not getattr(existing, 'is_cli_session', False):
+            existing.is_cli_session = True
+            existing.save(touch_updated_at=False)
         fresh_msgs = get_cli_session_messages(sid)
         if fresh_msgs and len(fresh_msgs) > len(existing.messages):
             # Prefix-equality guard: only extend if existing messages are a prefix of
