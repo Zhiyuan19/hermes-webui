@@ -456,6 +456,7 @@ across 53 test files.
 - Sessions persist across page reloads and SSH tunnel reconnects
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
+- **Gateway session real-time sync** — messaging platform sessions (Feishu, Telegram, Discord, Slack, WeChat) appear in the sidebar alongside WebUI sessions with platform-specific labels; new messages arrive in real-time via SSE push without manual refresh
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
 
 ### Workspace file browser
@@ -535,6 +536,51 @@ across 53 test files.
 - Desktop layout completely unchanged
 
 ---
+
+## Real-time gateway session sync
+
+Hermes Agent supports conversations across 10+ messaging platforms (Feishu, Telegram, Discord, Slack, WeChat, etc.) via its gateway system. The WebUI provides real-time visibility into all active gateway conversations through a background **Gateway Watcher** daemon:
+
+1. **Shared state.db** — all gateway sessions and messages are stored in the same SQLite database (`~/.hermes/state.db`) alongside CLI and WebUI sessions, with a `source` column distinguishing the origin (`feishu`, `telegram`, `discord`, etc.)
+2. **Gateway Watcher** — a background thread polls `state.db` every 5 seconds, computes a hash of all agent session IDs and their message timestamps, and pushes change events via Server-Sent Events (SSE) when the hash changes
+3. **Real-time sidebar updates** — when the frontend receives a `sessions_changed` SSE event, it re-renders the session list and refreshes the active conversation view, appending new messages from the agent's database without page reload
+
+### Cross-platform session bridge
+
+Gateway sessions are imported into the WebUI store on first click (via `POST /api/session/import_cli`), merging the agent's SQLite messages into the WebUI's JSON-backed session format. Once imported, subsequent SSE events keep the conversation view in sync:
+
+- New gateway sessions appear in the sidebar automatically
+- Messages arriving on an active gateway session are appended to the conversation view in real-time
+- Platform labels (Feishu, Telegram, Discord, etc.) are shown in the sidebar for at-a-glance identification
+- Fallback polling (30s) ensures active conversations stay updated if the SSE connection drops
+
+### Fix: agent session live refresh (v0.50.243+)
+
+The real-time sync depends on the `is_cli_session` field being correctly propagated to the frontend. A bug caused imported agent sessions to lose this flag after initial load, preventing the SSE handler from refreshing the active conversation:
+
+```
+Session.compact() omitted is_cli_session
+    → GET /api/session response lacks the flag
+    → S.session.is_cli_session = undefined
+    → SSE handler skips message refresh
+```
+
+**Fix (3 files):**
+
+| File | Change |
+|---|---|
+| `api/models.py` | Added `is_cli_session` to `Session.compact()` and `METADATA_FIELDS`; preserved extra kwargs in `__init__` for JSON deserialization |
+| `api/routes.py` | Added `_session_id_is_agent_session()` fallback check against `state.db`; legacy session migration on re-import |
+| `static/sessions.js` | Extracted shared `_refreshActiveAgentSession()` for SSE handler and fallback polling; added message refresh to fallback timer |
+
+After the fix, the full refresh pipeline is:
+
+```
+Feishu message → state.db → Gateway Watcher (5s poll)
+  → SSE sessions_changed → renderSessionList() (sidebar)
+  → _refreshActiveAgentSession() → POST /api/session/import_cli
+  → S.messages updated → renderMessages() (conversation view)
+```
 
 ## Architecture
 
